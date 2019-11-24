@@ -12,8 +12,9 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 use std::fs;
-use std::cmp::min;
+use std::cmp::{min, max};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Cursor {
 	row: usize,
 	column: usize,
@@ -22,6 +23,7 @@ struct Cursor {
 struct Kiro {
 	buffer: Vec<Vec<char>>,
 	cursor: Cursor,
+	row_offset: usize,
 	path: Option<path::PathBuf>,
 }
 
@@ -30,12 +32,18 @@ impl Default for Kiro {
 		Self {
 			buffer: vec![Vec::new()],
 			cursor: Cursor { row: 0, column: 0 },
+			row_offset: 0,
 			path: None,
 		}
 	}
 }
 
 impl Kiro {
+	// ターミナルの大きさ取得
+	fn terminal_size() -> (usize, usize) {
+		let (cols, rows) = termion::terminal_size().unwrap();
+		(rows as usize, cols as usize)
+	}
 	// ファイルを読み込む
 	fn open(&mut self, path: &path::Path) {
 		self.buffer = fs::read_to_string(path)
@@ -54,26 +62,70 @@ impl Kiro {
 			.unwrap_or_else(|| vec![Vec::new()]);
 		self.path = Some(path.into());
 		self.cursor = Cursor {row: 0, column: 0};
-		//self.row_offset = 0;
+		self.row_offset = 0;
 	}
 	// 画面描写
 	fn draw<T: Write>(&self, out: &mut T) {
+		let (rows, cols) = Self::terminal_size();
+
 		write!(out, "{}", clear::All);
 		write!(out, "{}", cursor::Goto(1, 1));
 
-		for line in &self.buffer {
-			for &c in line {
-				write!(out, "{}", c);
+		// 画面上の行列
+		let mut row = 0;
+		let mut col = 0;
+
+		let mut cursor: Option<Cursor> = None;
+
+		'outer: for i in self.row_offset..self.buffer.len() {
+			for j in 0..=self.buffer[i].len() {
+				if self.cursor == (Cursor { row: i, column: j }) {
+					cursor = Some(Cursor {
+						row: row,
+						column: col,
+					});
+				}
+
+				if let Some(c) = self.buffer[i].get(j) {
+					write!(out, "{}", c);
+					col += 1;
+					if col >= cols {
+						row += 1;
+						col = 0;
+						if row >= rows {
+							break 'outer;
+						} else {
+							write!(out, "\r\n");
+						}
+					}
+				}
 			}
-			write!(out, "\r\n");
+			row += 1;
+			col = 0;
+			if row >= rows {
+				break;
+			} else {
+				write!(out, "\r\n");
+			}
 		}
 
-		write!(
-			out,
-			"{}",
-			cursor::Goto(self.cursor.column as u16 + 1, self.cursor.row as u16 + 1)
-		);
+		if let Some(cursor) = cursor {
+			write!(
+				out,
+				"{}", 
+				cursor::Goto(cursor.column as u16 + 1, cursor.row as u16 + 1)
+			);
+		}
+
 		out.flush().unwrap();
+	}
+	// カーソルが画面に映るようにrow_offsetを設定
+	fn scroll(&mut self) {
+		let (rows, _) = Self::terminal_size();
+		self.row_offset = min(self.row_offset, self.cursor.row);
+		if self.cursor.row + 1 >= rows { 
+			self.row_offset = max(self.row_offset, self.cursor.row + 1 - rows);
+		}
 	}
 	// カーソルUP
 	fn cursor_up(&mut self) {
@@ -118,6 +170,12 @@ impl Kiro {
 			self.buffer[self.cursor.row].pop();
 			self.buffer[self.cursor.row].append(&mut later);
 			self.cursor.column -= 1;
+		} else if self.cursor.row > 0 {
+			let mut later = self.buffer.split_off(self.cursor.row);
+			self.buffer[self.cursor.row-1].pop();
+			self.buffer.append(&mut later);
+			self.cursor.row -= 1;
+			self.cursor.column = self.buffer[self.cursor.row].len();
 		}
 	}
 	// 保存
@@ -185,6 +243,7 @@ fn main() {
 			_ => {
 			}
 		}
+		state.scroll();
 		state.draw(&mut stdout);
 	}
 }
